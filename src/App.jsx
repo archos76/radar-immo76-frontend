@@ -86,6 +86,7 @@ if (!document.getElementById("radar-global-styles")) {
     @keyframes pulse-orange { 0%, 100% { box-shadow: 0 0 0 0 rgba(249,115,22,0.3); } 50% { box-shadow: 0 0 0 6px rgba(249,115,22,0); } }
     .fade-in { animation: fadeInUp 0.25s ease forwards; }
     .kpi-card { animation: fadeInUp 0.3s ease forwards; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   `;
   document.head.appendChild(styleEl);
 }
@@ -323,6 +324,23 @@ function getNoteLabel(note) {
   if (note >= 50) return "Correct"; if (note >= 35) return "Passable"; return "Risqué";
 }
 
+// Lit la fiche patrimoine (revenus retenus par la banque + crédits déjà en cours)
+function lireSituationProfil() {
+  var profil = null;
+  try { profil = JSON.parse(localStorage.getItem("radar-immo-profil-v1")); } catch(e) {}
+  if (!profil) return null;
+  var salaires = 0, loyers = 0, charges = 0;
+  (profil.revenus || []).forEach(function(r) {
+    var m = pf(r.montantAnnuel); var t = (r.type || "").toLowerCase();
+    if (t.indexOf("loyer") >= 0 || t.indexOf("loc") >= 0) loyers += m; else salaires += m;
+  });
+  (profil.credits || []).forEach(function(c) { charges += pf(c.chargeAnnuelle); });
+  (profil.chargesAutres || []).forEach(function(c) { charges += pf(c.montantAnnuel); });
+  var rev = (salaires + loyers * 0.7) / 12;
+  if (rev <= 0) return null;
+  return { revenusMensuels: rev, chargesMensuelles: charges / 12 };
+}
+
 // ── Scoring bancaire style 3D Investir ─────────────────────────────────────
 function calculerScoreBancaire(inputs, result) {
   var pv = pf(inputs.prixVente);
@@ -339,9 +357,12 @@ function calculerScoreBancaire(inputs, result) {
   var mensualite = pv <= 0 ? 0 : (tMensuel === 0 ? sommeEmpruntee / nMois : (sommeEmpruntee * tMensuel) / (1 - Math.pow(1 + tMensuel, -nMois)));
 
   // ─ Endettement (taux HCSF) : mensualité / (revenus perso + 70% loyer)
-  var revenusMensuels = 3500; // estimation si non renseigné
+  var sit = lireSituationProfil();
+  var revenusEstimes = !sit; // pas de fiche patrimoine : on retombe sur une estimation
+  var revenusMensuels = sit ? sit.revenusMensuels : 3500;
+  var chargesExistantes = sit ? sit.chargesMensuelles : 0;
   var loyerPris = loyer * 0.7;
-  var tauxHCSF = (revenusMensuels + loyerPris) > 0 ? (mensualite / (revenusMensuels + loyerPris)) * 100 : 99;
+  var tauxHCSF = (revenusMensuels + loyerPris) > 0 ? ((mensualite + chargesExistantes) / (revenusMensuels + loyerPris)) * 100 : 99;
   var scoreEndettement = tauxHCSF <= 25 ? 100 : tauxHCSF <= 30 ? 80 : tauxHCSF <= 35 ? 55 : tauxHCSF <= 40 ? 30 : 10;
 
   // ─ Rendement locatif brut
@@ -402,7 +423,7 @@ function calculerScoreBancaire(inputs, result) {
 
   return {
     scoreGlobal, scoreEndettement, scoreRendement, scoreTaille, scoreRegles,
-    tauxHCSF, rendBrut, pctApport, mensualite,
+    tauxHCSF, rendBrut, pctApport, mensualite, revenusEstimes, revenusMensuels,
     dossierLabel, dossierColor,
     pointsForts, pointsVigilance, suggestions
   };
@@ -487,6 +508,7 @@ function ScoringBancaire({ inputs, result, regimeActif }) {
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#1C1917" }}>Taux d'endettement HCSF</div>
           <div style={{ fontSize: 11, color: "#78716C" }}>Seuil réglementaire : 35% · Mensualité {Math.round(s.mensualite).toLocaleString("fr-FR")} €/mois</div>
+          <div style={{ fontSize: 11, color: s.revenusEstimes ? "#d97706" : "#78716C" }}>{s.revenusEstimes ? "⚠ Revenus estimés à 3 500 €/mois : remplis ta fiche patrimoine pour un vrai score" : "Calculé avec ta fiche patrimoine (" + Math.round(s.revenusMensuels).toLocaleString("fr-FR") + " €/mois retenus, crédits en cours inclus)"}</div>
         </div>
       </div>
 
@@ -1134,7 +1156,7 @@ function SimulationProjet({ photos, setPhotos, projets, setProjets, projetACharg
     // Merger avec DEFAULT_INPUTS pour ne jamais perdre les nouveaux champs
     var mergedInputs = Object.assign({}, DEFAULT_INPUTS, projetACharger.inputs);
     setInputs(mergedInputs);
-    setRegimeActif(projetACharger.regimeActif || "SAS SCI IS");
+    setRegimeActif(projetACharger.regimeActif || "SAS / SCI IS");
     if (projetACharger.lots) setLots(projetACharger.lots);
     setNomProjet(projetACharger.nom);
     var restoredPhotos = projetACharger.photos || [];
@@ -2282,7 +2304,7 @@ function SimulationProjet({ photos, setPhotos, projets, setProjets, projetACharg
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                   {[
                     { label: "Règle des 70%", value: regime.regle70 != null ? fmt(regime.regle70, 2) : "—", color: couleur70, sub: regime.regle70 != null ? (regime.regle70 < 0.7 ? "✓ OK" : "✗ Élevé") : "" },
-                    { label: "TRI (Payback)", value: regime.tri != null ? fmt(regime.tri, 1) + " ans" : "—", color: regime.tri != null && regime.tri <= 15 ? "#16a34a" : "#d97706", sub: "Dép. nette / EBE" },
+                    { label: "Retour sur invest.", value: regime.tri != null ? fmt(regime.tri, 1) + " ans" : "—", color: regime.tri != null && regime.tri <= 15 ? "#16a34a" : "#d97706", sub: "Dép. nette / EBE" },
                     { label: "Amortissement/an", value: fmtEur(result.amortissement), color: "#F97316", sub: pf(inputs.coefAmortissement) + "% de la valeur" },
                     { label: "Dépense nette", value: fmtEur(result.depenseNette), color: "#1C1917", sub: "Tout inclus" },
                   ].map(function(k) {
@@ -2424,7 +2446,7 @@ function SimulationProjet({ photos, setPhotos, projets, setProjets, projetACharg
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
               <thead>
                 <tr style={{ borderBottom: "2px solid rgba(148,163,184,0.2)" }}>
-                  {["Régime", "Tréso/an", "Cashflow/mois", "Impôt/an", "Rdt brut", "Rdt net", "TRI", "Règle 70%", "Note"].map(function(h) {
+                  {["Régime", "Tréso/an", "Cashflow/mois", "Impôt/an", "Rdt brut", "Rdt net", "Retour invest.", "Règle 70%", "Note"].map(function(h) {
                     return <th key={h} style={{ textAlign: h === "Régime" ? "left" : "right", padding: "8px 10px", fontWeight: 600, color: "#78716C", fontSize: 13 }}>{h}</th>;
                   })}
                 </tr>
@@ -2510,6 +2532,18 @@ function ReventeSimulator({ inputs, result, regime, regimeActif, cashFlowData })
   if (anneeR >= 22) impotPV = pvImposablePS * 0.172; // exonéré IR après 22 ans
   if (anneeR >= 30) impotPV = 0; // exonéré total après 30 ans
 
+  // SCI / SAS à l'IS : aucun abattement, et les amortissements déjà déduits sont repris
+  var isIS = regimeActif === "SAS / SCI IS";
+  var vnc = 0, pvFiscaleIS = 0;
+  if (isIS) {
+    vnc = Math.max(0, depenseNette - result.amortissement * anneeR);
+    pvFiscaleIS = Math.max(0, netVendeur - vnc);
+    var tisR = pf(inputs.tauxIS);
+    impotPV = tisR <= 15
+      ? Math.min(pvFiscaleIS, SEUIL_IS_BAS) * tisR / 100 + Math.max(0, pvFiscaleIS - SEUIL_IS_BAS) * 0.25
+      : pvFiscaleIS * tisR / 100;
+  }
+
   // Cash-flow cumulé
   var cfCumule = 0;
   cashFlowData.slice(0, anneeR).forEach(function(d) { cfCumule += d.cashflow; });
@@ -2561,9 +2595,20 @@ function ReventeSimulator({ inputs, result, regime, regimeActif, cashFlowData })
         <div style={{ margin: "8px 0", height: 1, background: "rgba(148,163,184,0.15)" }} />
         <StatRow label="Capital remboursé sur " value={fmtEur(Math.round(capitalRembourse))} color="#0ea5e9" />
         <StatRow label="Capital restant dû (à rembourser)" value={"−" + fmtEur(Math.round(capitalRestant))} color="#dc2626" />
-        <StatRow label={"Plus-value brute"} value={fmtEur(Math.round(plusValue))} />
-        <StatRow label={"Abattement IR (" + fmt(abattIR, 0) + "%) / PS (" + fmt(abattPS, 0) + "%)"} value={anneeR >= 30 ? "Exonéré total" : anneeR >= 22 ? "Exonéré IR" : "Partiel"} color={anneeR >= 22 ? "#16a34a" : "#d97706"} />
-        <StatRow label="Impôt sur la plus-value" value={"−" + fmtEur(Math.round(impotPV))} color="#dc2626" />
+        {isIS ? (
+          <>
+            <StatRow label="Valeur nette comptable (après amortissements)" value={fmtEur(Math.round(vnc))} />
+            <StatRow label="Plus-value imposable à l'IS (aucun abattement)" value={fmtEur(Math.round(pvFiscaleIS))} color="#d97706" />
+            <StatRow label="IS sur la plus-value" value={"−" + fmtEur(Math.round(impotPV))} color="#dc2626" />
+            <div style={{ fontSize: 11, color: "#92400e", background: "rgba(254,243,199,0.7)", borderRadius: 8, padding: "6px 10px", margin: "6px 0" }}>⚠ L'argent reste dans la société : pour le récupérer, il faudra en plus payer l'impôt sur les dividendes.</div>
+          </>
+        ) : (
+          <>
+            <StatRow label={"Plus-value brute"} value={fmtEur(Math.round(plusValue))} />
+            <StatRow label={"Abattement IR (" + fmt(abattIR, 0) + "%) / PS (" + fmt(abattPS, 0) + "%)"} value={anneeR >= 30 ? "Exonéré total" : anneeR >= 22 ? "Exonéré IR" : "Partiel"} color={anneeR >= 22 ? "#16a34a" : "#d97706"} />
+            <StatRow label="Impôt sur la plus-value" value={"−" + fmtEur(Math.round(impotPV))} color="#dc2626" />
+          </>
+        )}
         <div style={{ margin: "8px 0", height: 1, background: "rgba(148,163,184,0.15)" }} />
         <StatRow label={"Cash-flow cumulé sur " + anneeR + " ans"} value={(cfCumule >= 0 ? "+" : "") + fmtEur(Math.round(cfCumule))} color={cfCumule >= 0 ? "#16a34a" : "#dc2626"} />
         <StatRow label="Apport initial" value={"−" + fmtEur(apportInitial)} color="#78716C" />
@@ -2704,7 +2749,7 @@ function Dashboard({ projets, onOuvrir, onNav, user }) {
       </div>
 
       {/* Derniers projets + Raccourcis */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
 
         {/* Derniers projets */}
         <div style={SECTION}>
@@ -2840,6 +2885,14 @@ function AnalyseCommunes() {
   }, []);
   useEffect(function() { if (selected) fetchDetail(selected.nom); }, [selected, fetchDetail]);
 
+  const toggleCompare = function(c) {
+    setCompareList(function(prev) {
+      if (prev.find(function(x) { return x.nom === c.nom; })) return prev.filter(function(x) { return x.nom !== c.nom; });
+      if (prev.length >= 4) return prev; // 4 communes maximum
+      return prev.concat([c]);
+    });
+  };
+
   const filtered = useMemo(function() {
     return communes
       .filter(function(c) { const g = sn(c.scores && c.scores.global); return c.nom.toLowerCase().includes(search.toLowerCase()) && (g == null || g >= filterMin); })
@@ -2862,15 +2915,15 @@ function AnalyseCommunes() {
         </div>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-        <span style={{ fontSize: 12, color: "#A8A29E" }}>{filtered.length} communes · top 10 · clic = détail · clic droit = comparer</span>
+        <span style={{ fontSize: 12, color: "#A8A29E" }}>{filtered.length} communes · top 10 · clic = détail · bouton « Comparer » (4 max)</span>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={function() { loadCommunes(true); }} style={{ background: "linear-gradient(135deg,#38bdf8,#6366f1)", border: "none", borderRadius: 10, padding: "7px 14px", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>↻ Actualiser</button>
           {compareList.length > 0 && <button onClick={function() { setShowCompare(true); }} style={{ background: "linear-gradient(135deg,#a855f7,#ec4899)", border: "none", borderRadius: 10, padding: "7px 14px", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>Comparer ({compareList.length})</button>}
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 16 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
           {loading && <div style={{ color: "#A8A29E", padding: 40, textAlign: "center" }}>Chargement…</div>}
           {error && <div style={{ color: "#dc2626", padding: 20 }}>Erreur : {error}</div>}
           {!loading && !error && (
@@ -2887,6 +2940,7 @@ function AnalyseCommunes() {
                       <div style={{ fontSize: 21, fontWeight: 800, color: nc(g) }}>{g != null ? g.toFixed(1) : "—"}</div>
                     </div>
                     {c.population && <div style={{ fontSize: 12, color: "#A8A29E", marginBottom: 6 }}>{c.population.toLocaleString("fr-FR")} hab.</div>}
+                    <button onClick={function(e) { e.stopPropagation(); toggleCompare(c); }} style={{ marginBottom: 8, background: isCompared ? "#a855f7" : "rgba(168,85,247,0.08)", border: "1px solid rgba(168,85,247,0.3)", borderRadius: 6, padding: "2px 8px", fontSize: 10, fontWeight: 600, color: isCompared ? "#fff" : "#a855f7", cursor: "pointer" }}>{isCompared ? "✓ Dans le comparatif" : "+ Comparer"}</button>
                     {/* Indicateurs rapides : prix m² + tension locative */}
                     <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
                       {c.prix && c.prix.appartement_m2 && (
@@ -2926,7 +2980,7 @@ function AnalyseCommunes() {
         </div>
 
         {selected && (
-          <div style={{ width: 350, minWidth: 310, background: "rgba(255,255,255,0.8)", borderRadius: 20, padding: 16, boxShadow: "0 8px 32px #FFF3EC", backdropFilter: "blur(22px)", border: "1.5px solid #FFE8D9" }}>
+          <div style={{ width: 350, maxWidth: "100%", background: "rgba(255,255,255,0.8)", borderRadius: 20, padding: 16, boxShadow: "0 8px 32px #FFF3EC", backdropFilter: "blur(22px)", border: "1.5px solid #FFE8D9" }}>
             {loadingDetail && <div style={{ color: "#A8A29E", textAlign: "center", marginTop: 40 }}>Chargement…</div>}
             {detail && detail.error && <div style={{ color: "#dc2626" }}>Erreur : {detail.error}</div>}
             {detail && !detail.error && (
@@ -3010,7 +3064,7 @@ function AnalyseCommunes() {
 
       {showCompare && compareList.length > 0 && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={function() { setShowCompare(false); }}>
-          <div style={{ background: "rgba(255,255,255,0.95)", borderRadius: 20, padding: 20, minWidth: 500, maxWidth: 820, maxHeight: "80vh", overflowY: "auto", boxShadow: "0 20px 50px rgba(15,23,42,0.2)" }} onClick={function(e) { e.stopPropagation(); }}>
+          <div style={{ background: "rgba(255,255,255,0.95)", borderRadius: 20, padding: 20, minWidth: "min(500px, 92vw)", maxWidth: "min(820px, 96vw)", maxHeight: "80vh", overflowY: "auto", boxShadow: "0 20px 50px rgba(15,23,42,0.2)" }} onClick={function(e) { e.stopPropagation(); }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14, alignItems: "center" }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: "#1C1917" }}>Comparaison de communes</div>
               <button onClick={function() { setShowCompare(false); }} style={{ background: "transparent", border: "none", color: "#A8A29E", cursor: "pointer", fontSize: 19 }}>✕</button>
@@ -3023,7 +3077,7 @@ function AnalyseCommunes() {
                 })}
               </tbody>
             </table>
-            <div style={{ marginTop: 8, fontSize: 12, color: "#A8A29E" }}>Clic droit sur une commune pour ajouter/retirer.</div>
+            <div style={{ marginTop: 8, fontSize: 12, color: "#A8A29E" }}>Bouton « Comparer » (ou clic droit) sur une commune pour ajouter/retirer.</div>
           </div>
         </div>
       )}
@@ -3622,7 +3676,18 @@ function ComparateurOffres() {
     const coutAssurance = mensualiteAssur * nMois;
     const fraisTotaux = pf(o.fraisDossier) + pf(o.fraisGarantie) + pf(o.fraisCourtier);
     const coutTotal = coutInterets + coutAssurance + fraisTotaux;
-    const taeg = M > 0 ? ((coutTotal / M) / D) * 100 : 0;
+    // TAEG : taux qui égalise l'argent réellement reçu (prêt − frais) et toutes les mensualités, assurance comprise
+    var taeg = 0;
+    var netRecu = M - fraisTotaux;
+    if (netRecu > 0 && mensualiteTotale > 0) {
+      var lo = 0, hi = 1;
+      for (var it = 0; it < 60; it++) {
+        var mid = (lo + hi) / 2;
+        var valeur = mensualiteTotale * (1 - Math.pow(1 + mid, -nMois)) / mid;
+        if (valeur > netRecu) lo = mid; else hi = mid;
+      }
+      taeg = (Math.pow(1 + lo, 12) - 1) * 100;
+    }
     return { mensualiteCredit, mensualiteAssur, mensualiteTotale, coutInterets, coutAssurance, fraisTotaux, coutTotal, taeg };
   };
 
@@ -4366,7 +4431,8 @@ function SCIField({ sciVals, onChange, field, label, unit, step, hint }) {
 // ─── SCI MULTI-BIENS ────────────────────────────────────────────────────────
 
 const SEUIL_IS_BAS = 42500;
-const TAUX_CCA_LEGAL = 2.5; // taux légal CCA 2024
+const TAUX_CCA_LEGAL = 2.5; // taux proposé par défaut pour rémunérer les CCA
+const TAUX_CCA_PLAFOND = 4.55; // plafond d'intérêts déductibles (exercices clos au 31/12/2025)
 
 const DEFAULT_BIEN = function(id) {
   var now = new Date();
@@ -4406,7 +4472,7 @@ const DEFAULT_BIEN = function(id) {
 
 const DEFAULT_SCI_PARAMS = {
   tauxIS: "15",
-  tauxDividendes: "30",
+  tauxDividendes: "31.4",
   nbParts: "2",
   capitalSocial: "1000",
   tauxCCA: TAUX_CCA_LEGAL.toString(),
@@ -4570,7 +4636,6 @@ function projeterSCI(biens, sciParams, ccaAssocies) {
       soldeCCA, remboursementCCA, resultatNetApresIS,
       dividendesDistribues, dividendesNets, bienDetails,
     });
-    if (i === 0) console.log("[SCI Debug an1]", { anneeReelle, loyersTotal: Math.round(loyersTotal), chargesTotal: Math.round(chargesTotal), remboursementTotal: Math.round(remboursementTotal), isTotal: Math.round(isTotal), tresoConsolidee: Math.round(tresoConsolidee), provisionGrosTotal: Math.round(provisionGrosTotal), nbBiens: biens.length });
   }
   return rows;
 }
@@ -4947,6 +5012,7 @@ function FormulaireBien({ bien, onChange }) {
 // ─── SIMULATEUR MODE D'EXPLOITATION (MULTI-LOTS) ─────────────────────────────
 function SimulateurExploitation({ simProjets }) {
   var EXPLOIT_KEY = "radar-immo-exploit-v1";
+  var isMobile = useIsMobile();
   var _i = React.useState({
     prixAchat: "", commune: "",
     taxeFonciere: "", chargesAn: "", assurancePNO: "",
@@ -5156,7 +5222,7 @@ function SimulateurExploitation({ simProjets }) {
       </div>
 
       {view === "lots" && (
-        <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "300px 1fr", gap: 14 }}>
           {/* Colonne gauche : Paramètres compact */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={SECTION}>
@@ -5307,6 +5373,7 @@ function SimulateurExploitation({ simProjets }) {
 // ─── SUIVI PORTFOLIO ──────────────────────────────────────────────────────────
 function SuiviPortfolio({ simProjets }) {
   var PORTFOLIO_KEY = "radar-immo-portfolio-v1";
+  var isMobile = useIsMobile();
   var _b = React.useState(function() { try { return JSON.parse(localStorage.getItem(PORTFOLIO_KEY)) || []; } catch(e) { return []; } });
   var biens = _b[0]; var setBiens = _b[1];
   var _sel = React.useState(null); var selected = _sel[0]; var setSelected = _sel[1];
@@ -5415,7 +5482,7 @@ function SuiviPortfolio({ simProjets }) {
         })}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "280px 1fr", gap: 14 }}>
         {/* Colonne gauche : liste des biens */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", gap: 6 }}>
@@ -5459,7 +5526,7 @@ function SuiviPortfolio({ simProjets }) {
             {/* Info bien */}
             <div style={SECTION}>
               <SectionHeader icon="ti-home" title={bien.nom} />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
                 <div><label style={lS}>Nom du bien</label><input value={bien.nom} onChange={function(e) { updateBien(bien.id, "nom", e.target.value); }} style={fS} /></div>
                 <div><label style={lS}>Adresse / Commune</label><input value={bien.adresse} onChange={function(e) { updateBien(bien.id, "adresse", e.target.value); }} style={fS} /></div>
                 <div><label style={lS}>Date d'achat</label><input type="month" value={bien.dateAchat} onChange={function(e) { updateBien(bien.id, "dateAchat", e.target.value); }} style={fS} /></div>
@@ -5687,7 +5754,7 @@ function ProfilInvestisseur() {
       {/* État Civil */}
       <div style={SECTION}>
         <SectionHeader icon="👤" title="État civil" />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
           {profil.emprunteurs.map(function(emp, idx) {
             var prefix = "emprunteurs." + idx + ".";
             return (<div key={idx} style={{ background: "rgba(248,250,252,0.7)", borderRadius: 12, padding: 12, border: "1.5px solid #FFE8D9" }}>
@@ -6161,7 +6228,7 @@ function SimulateurSCI() {
               <div>
                 <label style={labelS}>Taux dividendes</label>
                 <div style={{ display: "flex", gap: 6 }}>
-                  {[{ val: "30", label: "30% (PFU)" }, { val: "17.2", label: "17.2% (PS)" }].map(function(t) {
+                  {[{ val: "31.4", label: "31,4% (PFU 2026)" }, { val: "18.6", label: "18,6% (PS seuls)" }].map(function(t) {
                     const isA = sciParams.tauxDividendes === t.val;
                     return <button key={t.val} onClick={function() { setSciParams(function(p) { return Object.assign({}, p, { tauxDividendes: t.val }); }); }}
                       style={{ flex: 1, padding: "7px 8px", borderRadius: 9, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, background: isA ? "#FFF3EC" : "rgba(148,163,184,0.12)", color: isA ? "#fff" : "#78716C" }}>{t.label}</button>;
@@ -6194,7 +6261,7 @@ function SimulateurSCI() {
                     onChange={function(e) { setSciParams(function(p) { return Object.assign({}, p, { tauxCCA: e.target.value }); }); }} style={inputS} />
                   <span style={{ fontSize: 12, color: "#A8A29E", minWidth: 28 }}>%</span>
                 </div>
-                <div style={{ fontSize: 10, color: "#A8A29E", marginTop: 2 }}>Taux légal 2024 : {TAUX_CCA_LEGAL}% — déductible du résultat fiscal</div>
+                <div style={{ fontSize: 10, color: "#A8A29E", marginTop: 2 }}>Plafond déductible : {TAUX_CCA_PLAFOND}% (exercices clos fin 2025, révisé chaque trimestre)</div>
               </div>
               <div>
                 <label style={labelS}>Stratégie de distribution</label>
@@ -6249,7 +6316,7 @@ function SimulateurSCI() {
       )}
 
       <div style={{ background: "rgba(241,245,249,0.8)", borderRadius: 12, padding: "10px 14px", fontSize: 12, color: "#78716C", border: "1.5px solid #FFE8D9" }}>
-        ℹ️ IS calculé sur le résultat <strong>consolidé</strong> de la SCI (Σ tous biens). Seuil taux réduit 15% : 42 500 €/an. Les loyers sont indexés +1%/an. Les CCA sont remboursables sans imposition et les intérêts versés sont déductibles (taux légal {TAUX_CCA_LEGAL}%). Attention à la plus-value à la revente (amortissements réintégrés).
+        ℹ️ IS calculé sur le résultat <strong>consolidé</strong> de la SCI (Σ tous biens). Seuil taux réduit 15% : 42 500 €/an. Les loyers sont indexés +1%/an. Les CCA sont remboursables sans imposition et les intérêts versés sont déductibles (dans la limite du plafond fiscal : {TAUX_CCA_PLAFOND}% fin 2025). Attention à la plus-value à la revente (amortissements réintégrés).
       </div>
     </div>
   );
@@ -6382,6 +6449,20 @@ function AuthScreen({ onAuth }) {
   );
 }
 
+// Si un autre compte se connecte sur cet appareil, on efface les données locales du compte précédent
+function assurerDonneesLocales(userId) {
+  try {
+    var OWNER_KEY = "radar-immo-owner";
+    var owner = localStorage.getItem(OWNER_KEY);
+    if (owner && owner !== userId) {
+      Object.keys(localStorage).forEach(function(k) {
+        if (k.indexOf("radar-immo-") === 0 && k !== CACHE_KEY) localStorage.removeItem(k);
+      });
+    }
+    localStorage.setItem(OWNER_KEY, userId);
+  } catch(e) {}
+}
+
 // ─── APP WRAPPER (Auth + Sync) ───────────────────────────────────────────────
 export default function App() {
   var _auth = useState(null); var user = _auth[0]; var setUser = _auth[1];
@@ -6419,12 +6500,13 @@ export default function App() {
     return <AuthScreen onAuth={setUser} />;
   }
 
-  return <AppMain user={user} onLogout={function() { getSupabase().then(function(sb) { if (sb) sb.auth.signOut(); }); setUser(null); }} />;
+  assurerDonneesLocales(user.id);
+  return <AppMain key={user.id} user={user} onLogout={function() { getSupabase().then(function(sb) { if (sb) sb.auth.signOut(); }); setUser(null); }} />;
 }
 
 function AppMain({ user, onLogout }) {
   const [onglet, setOnglet] = useState("dashboard");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(function() { return window.innerWidth >= 768; });
   const [cloudReady, setCloudReady] = useState(false);
 
   // Photos et projets remontés ici pour survivre aux changements d'onglet
@@ -6520,7 +6602,7 @@ function AppMain({ user, onLogout }) {
     <div style={{ display: "flex", minHeight: "100vh", background: "#FFF8F3", fontFamily: "'Plus Jakarta Sans',system-ui,sans-serif" }}>
 
       {/* Sidebar */}
-      <aside style={{ width: 200, minWidth: 200, background: "#fff", borderRight: "1.5px solid #FFE8D9", padding: "18px 12px", display: "flex", flexDirection: "column", gap: 4, position: "sticky", top: 0, height: "100vh", overflowX: "hidden", transition: "width 0.22s cubic-bezier(.4,0,.2,1), min-width 0.22s cubic-bezier(.4,0,.2,1), padding 0.22s", zIndex: 30, boxShadow: sidebarOpen ? "4px 0 24px #FFF3EC" : "none" }}>
+      <aside style={{ width: sidebarOpen ? 200 : 56, minWidth: sidebarOpen ? 200 : 56, background: "#fff", borderRight: "1.5px solid #FFE8D9", padding: sidebarOpen ? "18px 12px" : "18px 8px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 4, position: "sticky", top: 0, height: "100vh", overflowX: "hidden", transition: "width 0.22s cubic-bezier(.4,0,.2,1), min-width 0.22s cubic-bezier(.4,0,.2,1), padding 0.22s", zIndex: 30, boxShadow: sidebarOpen ? "4px 0 24px #FFF3EC" : "none" }}>
 
         {/* Logo */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24, overflow: "hidden", minHeight: 40 }}>
@@ -6549,9 +6631,9 @@ function AppMain({ user, onLogout }) {
             const isActive = onglet === n.id;
             return (
               <button key={n.id} onClick={function() { handleNav(n.id); }} title={!sidebarOpen ? n.label : undefined}
-                style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "flex-start", padding: "9px 10px", borderRadius: 10, border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500, width: "100%", textAlign: "left", background: isActive ? "linear-gradient(135deg,#FFF3EC,rgba(56,189,248,0.15))" : "transparent", color: isActive ? "#F97316" : "#78716C", borderLeft: isActive ? "3px solid #6366f1" : "3px solid transparent", transition: "all 0.15s", overflow: "hidden", whiteSpace: "nowrap", position: "relative" }}>
+                style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: sidebarOpen ? "flex-start" : "center", padding: sidebarOpen ? "9px 10px" : "9px 0", borderRadius: 10, border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500, width: "100%", textAlign: "left", background: isActive ? "linear-gradient(135deg,#FFF3EC,rgba(56,189,248,0.15))" : "transparent", color: isActive ? "#F97316" : "#78716C", borderLeft: isActive ? "3px solid #6366f1" : "3px solid transparent", transition: "all 0.15s", overflow: "hidden", whiteSpace: "nowrap", position: "relative" }}>
                 <Icon name={n.icon} size={18} style={{ flexShrink: 0 }} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{n.label}</span>
+                {sidebarOpen && <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{n.label}</span>}
                 {isActive && !sidebarOpen && <div style={{ position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)", width: 3, height: 20, borderRadius: "3px 0 0 3px", background: "#F97316" }} />}
               </button>
             );
@@ -6722,7 +6804,7 @@ function DPEBadge(props) {
 // ─── COMPARATEUR DPE & TRAVAUX (API ADEME) ────────────────────────────────────
 function ComparateurDPE() {
   var DPE_COLORS = DPE_COLORS_GLOBAL;
-  var DPE_ILLEGAL = ["F","G"];
+  var DPE_ILLEGAL = ["G"]; // G interdit depuis 2025 ; F en 2028 ; E en 2034
   var DPE_ORDER   = ["A","B","C","D","E","F","G"];
 
   // Impact loyer et valeur par classe (écart vs D = référence neutre)
@@ -7025,12 +7107,17 @@ function ComparateurDPE() {
                 </div>
               </div>
 
+              {dpeActuel === "F" && (
+                <div style={{ marginTop:10, background:"rgba(245,158,11,0.07)", border:"1.5px solid rgba(245,158,11,0.25)", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#92400e" }}>
+                  ⚠ <strong>Classe F — location interdite à partir du 1er janvier 2028.</strong> Le loyer est déjà gelé : anticipe les travaux.
+                </div>
+              )}
               {/* Alerte passoire */}
               {estPassoire && (
                 <div style={{ marginTop:10, background:"rgba(220,38,38,0.07)", border:"1.5px solid rgba(220,38,38,0.25)", borderRadius:10, padding:"10px 14px", display:"flex", gap:8, alignItems:"flex-start" }}>
                   <Icon name="ti-flame" size={18} color="#dc2626" />
                   <div style={{ fontSize:13 }}>
-                    <strong style={{ color:"#dc2626" }}>Passoire thermique — Location interdite depuis 2025.</strong>
+                    <strong style={{ color:"#dc2626" }}>Classe G — Location interdite depuis le 1er janvier 2025.</strong>
                     <span style={{ color:"#78716C" }}> Une rénovation est obligatoire pour louer légalement ce logement.</span>
                   </div>
                 </div>
@@ -7098,7 +7185,7 @@ function ComparateurDPE() {
 
       {/* ── Résultats ── */}
       {dpeActuel && coutBrut > 0 && (
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(280px, 1fr))", gap:12 }}>
 
           {/* Coûts */}
           <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
